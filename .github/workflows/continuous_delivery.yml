@@ -29,10 +29,23 @@ jobs:
           export PATH="$HOME/.poetry/bin:$PATH"
       - name: Backup pyproject.toml
         run: cp pyproject.toml pyproject.toml.bak
+      - name: Change pydantic version
+        run: |
+          poetry add pydantic@${{ matrix.pydantic-version }} --lock
+      - name: Cache Poetry virtualenv and dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pypoetry
+            ~/.local/share/pypoetry/virtualenvs
+          key: ${{ runner.os }}-poetry-${{ matrix.python-version }}-${{ matrix.pydantic-version }}-${{ hashFiles('poetry.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-poetry-${{ matrix.python-version }}-${{ matrix.pydantic-version }}-
       - name: Install project dependencies with Poetry
         run: |
-          poetry add pydantic@${{ matrix.pydantic-version }}
           poetry install
+      - name: Restore pyproject.toml
+        run: |
           mv pyproject.toml.bak pyproject.toml
       - name: Style check
         run: |
