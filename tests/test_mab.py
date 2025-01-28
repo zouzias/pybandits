@@ -28,7 +28,14 @@ import pytest
 from hypothesis import given
 from pytest_mock import MockerFixture
 
-from pybandits.base import ACTION_IDS_PREFIX, ActionId, BinaryReward, Float01, Probability
+from pybandits.base import (
+    ACTION_IDS_PREFIX,
+    ActionId,
+    BinaryReward,
+    Float01,
+    Probability,
+    PyBanditsBaseModel,
+)
 from pybandits.mab import BaseMab
 from pybandits.model import Beta, BetaCC
 from pybandits.pydantic_version_compatibility import ValidationError
@@ -36,11 +43,18 @@ from pybandits.strategy import ClassicBandit
 
 
 class DummyMab(BaseMab):
+    actions: Dict[ActionId, Beta]
     epsilon: Optional[Float01] = None
     default_action: Optional[ActionId] = None
 
-    def update(self, actions: List[ActionId], rewards: Union[List[BinaryReward], List[List[BinaryReward]]]):
-        self._validate_update_params(actions=actions, rewards=rewards)
+    def _update(
+        self,
+        actions: List[ActionId],
+        rewards: Union[List[BinaryReward], List[List[BinaryReward]]],
+        quantities: Optional[List[Union[float, List[float], None]]],
+        **kwargs,
+    ):
+        pass
 
     def predict(
         self,
@@ -69,7 +83,7 @@ def test_base_mab_raise_on_bad_actions(cost=0.0):
         DummyMab(actions={"a1": None, "a2": None}, strategy=ClassicBandit())
     with pytest.warns(UserWarning):
         DummyMab(actions={"a1": Beta()}, strategy=ClassicBandit())
-    with pytest.raises(AttributeError):
+    with pytest.raises(ValidationError):
         DummyMab(actions={"a1": Beta(), "a2": BetaCC(cost=cost)}, strategy=ClassicBandit())
 
 
@@ -77,19 +91,27 @@ def test_base_mab_check_update_params():
     dummy_mab = DummyMab(actions={"a1": Beta(), "a2": Beta()}, strategy=ClassicBandit())
     with pytest.raises(AttributeError):
         # actionId doesn't exist
-        dummy_mab._validate_update_params(actions=["a1", "a3"], rewards=[1, 1])
-    with pytest.raises(AttributeError):
+        dummy_mab.update(actions=["a1", "a3"], rewards=[1, 1], quantities=None)
+    with pytest.raises(ValidationError):
         # actionId cannot be empty
-        dummy_mab._validate_update_params(actions=[""], rewards=[1])
+        dummy_mab.update(actions=[""], rewards=[1], quantities=None)
     with pytest.raises(AttributeError):
-        dummy_mab._validate_update_params(actions=["a1", "a2"], rewards=[1])
+        dummy_mab._validate_params_lengths(actions=["a1", "a2"], rewards=[1], quantities=None)
+
+    with pytest.raises(AttributeError):
+        # quantities of different length
+        dummy_mab._validate_params_lengths(actions=["a1", "a2"], rewards=[1, 1], quantities=[1])
+
+    with pytest.raises(AttributeError):
+        # context of different length
+        dummy_mab._validate_params_lengths(actions=["a1", "a2"], rewards=[1, 1], quantities=None, context=[1])
 
 
 @given(r1=st.integers(min_value=0, max_value=1), r2=st.integers(min_value=0, max_value=1))
 def test_base_mab_update_ok(r1, r2):
     dummy_mab = DummyMab(actions={"a1": Beta(), "a2": Beta()}, strategy=ClassicBandit())
-    dummy_mab.update(actions=["a1", "a2"], rewards=[r1, r2])
-    dummy_mab.update(actions=["a1", "a1"], rewards=[r1, r2])
+    dummy_mab.update(actions=["a1", "a2"], rewards=[r1, r2], quantities=None)
+    dummy_mab.update(actions=["a1", "a1"], rewards=[r1, r2], quantities=None)
 
 
 ########################################################################################################################
@@ -100,7 +122,7 @@ def test_base_mab_update_ok(r1, r2):
 
 def test_returns_empty_dict_when_no_action_specific_kwargs():
     kwargs = {"param1": 1, "param2": 2}
-    result, _ = BaseMab._extract_action_specific_kwargs(**kwargs)
+    result, _, _ = BaseMab._extract_action_specific_kwargs(**kwargs)
     assert result == {}
 
 
@@ -108,13 +130,13 @@ def test_processes_kwargs_with_non_dict_values():
     kwargs = {
         f"{ACTION_IDS_PREFIX}param1": "not_a_dict",
     }
-    result, _ = BaseMab._extract_action_specific_kwargs(**kwargs)
+    result, _, _ = BaseMab._extract_action_specific_kwargs(**kwargs)
     assert result == {}
 
 
 def test_manages_kwargs_with_empty_dicts():
     kwargs = {f"{ACTION_IDS_PREFIX}param1": {}, f"{ACTION_IDS_PREFIX}param2": {}}
-    result, _ = BaseMab._extract_action_specific_kwargs(**kwargs)
+    result, _, _ = BaseMab._extract_action_specific_kwargs(**kwargs)
     assert result == {}
 
 
@@ -124,7 +146,7 @@ def test_extracts_action_specific_kwargs_with_valid_keys():
         f"{ACTION_IDS_PREFIX}param2": {"action1": 3, "action2": 4},
     }
     expected_output = {"action1": {"param1": 1, "param2": 3}, "action2": {"param1": 2, "param2": 4}}
-    result, _ = BaseMab._extract_action_specific_kwargs(**kwargs)
+    result, _, _ = BaseMab._extract_action_specific_kwargs(**kwargs)
     assert result == expected_output
 
 
@@ -135,18 +157,25 @@ def test_extracts_action_specific_kwargs_with_valid_keys():
 
 
 def test_extracts_action_model_class_and_attributes_with_valid_kwargs(mocker: MockerFixture):
-    class MockActionModel:
-        def __init__(self, param1, param2):
-            pass
+    class MockActionModel(PyBanditsBaseModel):
+        param1: int
+        param2: int
 
     mocker.patch("pybandits.mab.get_args", return_value=(None, MockActionModel))
-    mocker.patch("pybandits.mab.extract_argument_names_from_function", return_value=["param1", "param2"])
+    mocker.patch("pybandits.mab.extract_argument_names", return_value=["param1", "param2"])
+    mocker.patch("pybandits.mab.issubclass", return_value=True)
 
     kwargs = {"param1": 1, "param2": 2}
-    action_model_cold_start, action_general_kwargs = BaseMab._extract_action_model_class_and_attributes(**kwargs)
+    kwargs_backup = kwargs.copy()
+    (
+        model_cold_start,
+        _,
+        action_general_kwargs,
+        _,
+    ) = BaseMab._extract_action_model_class_and_attributes(kwargs)
 
-    assert action_model_cold_start == MockActionModel
-    assert action_general_kwargs == {"param1": 1, "param2": 2}
+    assert model_cold_start == MockActionModel
+    assert action_general_kwargs == kwargs_backup
 
 
 def test_returns_callable_for_action_model_cold_start_instantiation(mocker: MockerFixture):
@@ -156,12 +185,17 @@ def test_returns_callable_for_action_model_cold_start_instantiation(mocker: Mock
             pass
 
     mocker.patch("pybandits.mab.get_args", return_value=(None, MockActionModel))
-    mocker.patch("pybandits.mab.extract_argument_names_from_function", return_value=[])
-
+    mocker.patch("pybandits.mab.extract_argument_names", return_value=[])
+    mocker.patch("pybandits.mab.issubclass", return_value=True)
     kwargs = {}
-    action_model_cold_start, _ = BaseMab._extract_action_model_class_and_attributes(**kwargs)
+    (
+        model_cold_start,
+        _,
+        action_general_kwargs,
+        _,
+    ) = BaseMab._extract_action_model_class_and_attributes(kwargs)
 
-    assert callable(action_model_cold_start)
+    assert callable(model_cold_start)
 
 
 def test_handles_empty_kwargs_gracefully(mocker: MockerFixture):
@@ -170,13 +204,18 @@ def test_handles_empty_kwargs_gracefully(mocker: MockerFixture):
             pass
 
     mocker.patch("pybandits.mab.get_args", return_value=(None, MockActionModel))
-    mocker.patch("pybandits.mab.extract_argument_names_from_function", return_value=[])
-
+    mocker.patch("pybandits.mab.extract_argument_names", return_value=[])
+    mocker.patch("pybandits.mab.issubclass", return_value=True)
     kwargs = {}
-    action_model_cold_start, action_general_kwargs = BaseMab._extract_action_model_class_and_attributes(**kwargs)
+    (
+        model_cold_start,
+        quantitative_model_cold_start,
+        action_general_kwargs,
+        quantitative_action_general_kwargs,
+    ) = BaseMab._extract_action_model_class_and_attributes(kwargs)
 
-    assert action_model_cold_start == MockActionModel
-    assert action_general_kwargs == {}
+    assert model_cold_start == MockActionModel
+    assert action_general_kwargs == kwargs
 
 
 def test_handles_kwargs_with_no_matching_action_model_attributes(mocker: MockerFixture):
@@ -185,13 +224,10 @@ def test_handles_kwargs_with_no_matching_action_model_attributes(mocker: MockerF
             pass
 
     mocker.patch("pybandits.mab.get_args", return_value=(None, MockActionModel))
-    mocker.patch("pybandits.mab.extract_argument_names_from_function", return_value=[])
-
+    mocker.patch("pybandits.mab.extract_argument_names", return_value=[])
     kwargs = {"irrelevant_param": 1}
-    action_model_cold_start, action_general_kwargs = BaseMab._extract_action_model_class_and_attributes(**kwargs)
-
-    assert action_model_cold_start == MockActionModel
-    assert action_general_kwargs == {}
+    with pytest.raises(ValueError):
+        BaseMab._extract_action_model_class_and_attributes(kwargs)
 
 
 ########################################################################################################################

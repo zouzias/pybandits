@@ -28,8 +28,9 @@ import numpy as np
 from scipy.stats import ttest_ind_from_stats
 from typing_extensions import Self
 
-from pybandits.base import ActionId, Float01, Probability, PyBanditsBaseModel
-from pybandits.model import Beta, BetaMOCC, Model
+from pybandits.base import ActionId, Float01, Probability, PyBanditsBaseModel, UnifiedActionId
+from pybandits.base_model import BaseModel
+from pybandits.model import Beta, BetaMOCC
 from pybandits.pydantic_version_compatibility import field_validator, validate_call
 
 
@@ -60,7 +61,9 @@ class Strategy(PyBanditsBaseModel, ABC):
         return mutated_strategy
 
     @abstractmethod
-    def select_action(self, p: Dict[ActionId, Probability], actions: Optional[Dict[ActionId, Model]]) -> ActionId:
+    def select_action(
+        self, p: Dict[UnifiedActionId, Probability], actions: Optional[Dict[ActionId, BaseModel]]
+    ) -> UnifiedActionId:
         """
         Select the action.
         """
@@ -90,22 +93,22 @@ class ClassicBandit(Strategy):
     @validate_call
     def select_action(
         self,
-        p: Dict[ActionId, float],
-        actions: Optional[Dict[ActionId, Model]] = None,
-    ) -> ActionId:
+        p: Dict[UnifiedActionId, float],
+        actions: Optional[Dict[UnifiedActionId, BaseModel]] = None,
+    ) -> UnifiedActionId:
         """
         Select the action with the highest probability of getting a positive reward.
 
         Parameters
         ----------
-        p : Dict[ActionId, Probability]
+        p : Dict[UnifiedActionId, Probability]
             The dictionary of actions and their sampled probability of getting a positive reward.
-        actions : Optional[Dict[ActionId, Model]]
+        actions : Optional[Dict[UnifiedActionId, BaseModel]]
             The dictionary of actions and their associated model.
 
         Returns
         -------
-        selected_action: ActionId
+        selected_action: UnifiedActionId
             The selected action.
         """
         return max(p, key=p.get)
@@ -162,9 +165,9 @@ class BestActionIdentificationBandit(Strategy):
     @validate_call
     def select_action(
         self,
-        p: Dict[ActionId, float],
-        actions: Optional[Dict[ActionId, Model]] = None,
-    ) -> ActionId:
+        p: Dict[UnifiedActionId, float],
+        actions: Optional[Dict[UnifiedActionId, BaseModel]] = None,
+    ) -> UnifiedActionId:
         """
         Select with probability self.exploit_p the best action (i.e. the action with the highest probability of getting
         a positive reward), and with probability 1-self.exploit_p it returns the second best action (i.e. the action
@@ -172,14 +175,14 @@ class BestActionIdentificationBandit(Strategy):
 
         Parameters
         ----------
-        p : Dict[ActionId, Probability]
+        p : Dict[UnifiedActionId, Probability]
             The dictionary of actions and their sampled probability of getting a positive reward.
-        actions : Optional[Dict[ActionId, Model]]
+        actions : Optional[Dict[UnifiedActionId, BaseModel]]
             The dictionary of actions and their associated model.
 
         Returns
         -------
-        selected_action: ActionId
+        selected_action: UnifiedActionId
             The selected action.
         """
         p = p.copy()
@@ -198,13 +201,13 @@ class BestActionIdentificationBandit(Strategy):
         return selected_action
 
     # TODO: WIP this is valid only for SmabBernoulli
-    def compare_best_actions(self, actions: Dict[ActionId, Beta]) -> float:
+    def compare_best_actions(self, actions: Dict[UnifiedActionId, Beta]) -> float:
         """
         Compare the 2 best actions, hence the 2 actions with the highest expected means of getting a positive reward.
 
         Parameters
         ----------
-        actions: Dict[ActionId, Beta]
+        actions: Dict[UnifiedActionId, Beta]
 
         Returns
         ----------
@@ -244,31 +247,34 @@ class CostControlStrategy(Strategy, ABC):
     @validate_call
     def _evaluate_and_select(
         cls,
-        p: Union[Dict[ActionId, Probability], Dict[ActionId, List[Probability]]],
-        actions: Dict[ActionId, Model],
-        feasible_actions: List[ActionId],
-    ) -> ActionId:
+        p: Union[Dict[UnifiedActionId, Probability], Dict[UnifiedActionId, List[Probability]]],
+        actions: Dict[UnifiedActionId, BaseModel],
+        feasible_actions: List[UnifiedActionId],
+    ) -> UnifiedActionId:
         """
         Evaluate the feasible actions and select the one with the minimum cost.
 
         Parameters
         ----------
-        p: Union[Dict[ActionId, Probability], Dict[ActionId, List[Probability]]]
+        p: Union[Dict[UnifiedActionId, Probability], Dict[UnifiedActionId, List[Probability]]]
             The dictionary of actions and their sampled probability of getting a positive reward.
-        actions: Dict[ActionId, Model]
+        actions: Dict[UnifiedActionId, BaseModel]
             The dictionary of actions and their associated model.
-        feasible_actions: List[ActionId]
+        feasible_actions: List[UnifiedActionId]
             The list of feasible actions.
 
         Returns
         -------
-        selected_action: ActionId
+        selected_action: UnifiedActionId
             The selected action.
         """
         # feasible actions enriched with their characteristics (cost, np.mean(probabilities), action_id)
-        # the negative probability ensures that if we order the actions based on their minimum values the one with
+        # the negative probability ensures that if we order the actions based on their minimum quantities the one with
         # higher probability will be selected
-        sortable_actions = [(actions[a].cost, -cls._average(p[a]), a) for a in feasible_actions]
+        sortable_actions = [
+            (actions[a[0]].cost(*a[1]) if isinstance(a, tuple) else actions[a].cost, -cls._average(p[a]), str(a))
+            for a in feasible_actions
+        ]
 
         # select the action with the min cost (and the highest mean of probabilities in case of cost equality)
         _, _, selected_action = sorted(sortable_actions)[0]
@@ -331,7 +337,9 @@ class CostControlBandit(CostControlStrategy):
         return mutated_cost_control_bandit
 
     @validate_call
-    def select_action(self, p: Dict[ActionId, Probability], actions: Dict[ActionId, Model]) -> ActionId:
+    def select_action(
+        self, p: Dict[UnifiedActionId, Probability], actions: Dict[UnifiedActionId, BaseModel]
+    ) -> UnifiedActionId:
         """
         Select the action with the minimum cost among the set of feasible actions (the actions whose expected rewards
         are above a certain lower bound defined as [(1-subsidy_factor)*max_p, max_p], where max_p is the highest
@@ -339,14 +347,14 @@ class CostControlBandit(CostControlStrategy):
 
         Parameters
         ----------
-        p: Dict[ActionId, Probability]
+        p: Dict[UnifiedActionId, Probability]
             The dictionary or actions and their sampled probability of getting a positive reward.
-        actions: Dict[ActionId, BetaCC]
+        actions: Dict[UnifiedActionId, BetaCC]
             The dictionary or actions and their cost.
 
         Returns
         -------
-        selected_action: ActionId
+        selected_action: UnifiedActionId
             The selected action.
         """
         # get the highest expected reward sampled value
@@ -366,14 +374,14 @@ class MultiObjectiveStrategy(Strategy, ABC):
 
     @classmethod
     @validate_call
-    def get_pareto_front(cls, p: Dict[ActionId, List[Probability]]) -> List[ActionId]:
+    def get_pareto_front(cls, p: Dict[UnifiedActionId, List[Probability]]) -> List[UnifiedActionId]:
         """
         Create Pareto optimal set of actions (Pareto front) A* identified as actions that are not dominated by
         any action out of the set A*.
 
         Parameters:
         -----------
-        p: Dict[ActionId, Probability]
+        p: Dict[UnifiedActionId, Probability]
             The dictionary or actions and their sampled probability of getting a positive reward for each objective.
 
         Return
@@ -425,7 +433,7 @@ class MultiObjectiveBandit(MultiObjectiveStrategy):
     """
 
     @validate_call
-    def select_action(self, p: Dict[ActionId, List[Probability]], **kwargs) -> ActionId:
+    def select_action(self, p: Dict[UnifiedActionId, List[Probability]], **kwargs) -> UnifiedActionId:
         """
         Select an action at random from the Pareto optimal set of action. The Pareto optimal action set (Pareto front)
         A* is the set of actions not dominated by any other actions not in A*. Dominance relation is established based
@@ -453,7 +461,9 @@ class MultiObjectiveCostControlBandit(MultiObjectiveStrategy, CostControlStrateg
     """
 
     @validate_call
-    def select_action(self, p: Dict[ActionId, List[Probability]], actions: Dict[ActionId, BetaMOCC]) -> ActionId:
+    def select_action(
+        self, p: Dict[UnifiedActionId, List[Probability]], actions: Dict[UnifiedActionId, BetaMOCC]
+    ) -> UnifiedActionId:
         """
         Select the action with the minimum cost among the Pareto optimal set of action. The Pareto optimal
         action set (Pareto front) A* is the set of actions not dominated by any other actions not in A*. Dominance
@@ -461,12 +471,12 @@ class MultiObjectiveCostControlBandit(MultiObjectiveStrategy, CostControlStrateg
 
         Parameters
         ----------
-        p: Dict[ActionId, List[Probability]]
+        p: Dict[UnifiedActionId, List[Probability]]
              The dictionary of actions and their sampled probability of getting a positive reward for each objective.
 
         Returns
         -------
-        selected_action: ActionId
+        selected_action: UnifiedActionId
             The selected action.
         """
         pareto_set = self.get_pareto_front(p=p)

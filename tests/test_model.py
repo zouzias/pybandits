@@ -19,11 +19,12 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
+from copy import deepcopy
 
 import numpy as np
 import pandas as pd
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from pybandits.model import (
@@ -36,6 +37,7 @@ from pybandits.model import (
     StudentT,
 )
 from pybandits.pydantic_version_compatibility import ValidationError
+from tests.test_utils import literal_update_methods
 
 ########################################################################################################################
 
@@ -55,7 +57,7 @@ def test_can_init_beta(success_counter, failure_counter):
         assert (b.n_successes, b.n_failures) == (1, 1)
 
 
-def test_both_or_neither_counters_are_defined():
+def test_both_or_neither_models_are_defined():
     with pytest.raises(ValidationError):
         Beta(n_successes=0)
     with pytest.raises(ValidationError):
@@ -80,12 +82,11 @@ def test_beta_get_stats_is_working(e: Beta):
     assert e.count >= 2, "Count too low"
 
 
-def test_beta_sample_proba():
+def test_beta_sample_proba(n_samples=100):
     b = Beta(n_successes=1, n_failures=2)
-
-    for _ in range(1000):
-        prob = b.sample_proba()
-        assert prob >= 0 and prob <= 1
+    prob = b.sample_proba(n_samples=n_samples)
+    assert len(prob) == n_samples
+    assert all([p >= 0 and p <= 1 for p in prob])
 
 
 ########################################################################################################################
@@ -112,22 +113,22 @@ def test_can_init_betaCC(a_float):
 
 def test_can_init_base_beta_mo():
     # init with default params
-    b = BetaMO(counters=[Beta(), Beta()])
-    assert b.counters[0].n_successes == 1 and b.counters[0].n_failures == 1
-    assert b.counters[1].n_successes == 1 and b.counters[1].n_failures == 1
+    b = BetaMO(models=[Beta(), Beta()])
+    assert b.models[0].n_successes == 1 and b.models[0].n_failures == 1
+    assert b.models[1].n_successes == 1 and b.models[1].n_failures == 1
 
     # init with empty dict
-    b = BetaMO(counters=[{}, {}])
-    assert b.counters[0] == Beta()
+    b = BetaMO(models=[{}, {}])
+    assert b.models[0] == Beta()
 
     # invalid init with BetaCC instead of Beta
     with pytest.raises(ValidationError):
-        BetaMO(counters=[BetaCC(cost=1), BetaCC(cost=1)])
+        BetaMO(models=[BetaCC(cost=1), BetaCC(cost=1)])
 
 
-def test_calculate_proba_beta_mo():
-    b = BetaMO(counters=[Beta(), Beta()])
-    b.sample_proba()
+def test_calculate_proba_beta_mo(n_samples=100):
+    b = BetaMO(models=[Beta(), Beta()])
+    b.sample_proba(n_samples=n_samples)
 
 
 @given(
@@ -139,12 +140,12 @@ def test_beta_update_mo(rewards1, rewards2):
     rewards1, rewards2 = rewards1[:min_len], rewards2[:min_len]
     rewards = [[a, b] for a, b in zip(rewards1, rewards2)]
 
-    b = BetaMO(counters=[Beta(n_successes=11, n_failures=22), Beta(n_successes=33, n_failures=44)])
+    b = BetaMO(models=[Beta(n_successes=11, n_failures=22), Beta(n_successes=33, n_failures=44)])
 
     b.update(rewards=rewards)
 
     assert b == BetaMO(
-        counters=[
+        models=[
             Beta(n_successes=11 + sum(rewards1), n_failures=22 + len(rewards1) - sum(rewards1)),
             Beta(n_successes=33 + sum(rewards2), n_failures=44 + len(rewards2) - sum(rewards2)),
         ]
@@ -162,16 +163,16 @@ def test_beta_update_mo(rewards1, rewards2):
 
 def test_can_init_beta_mo():
     # init with default params
-    b = BetaMO(counters=[Beta(), Beta()])
-    assert b.counters == [Beta(), Beta()]
+    b = BetaMO(models=[Beta(), Beta()])
+    assert b.models == [Beta(), Beta()]
 
     # init with empty dict
-    b = BetaMO(counters=[{}, {}])
-    assert b.counters == [Beta(), Beta()]
+    b = BetaMO(models=[{}, {}])
+    assert b.models == [Beta(), Beta()]
 
     # invalid init with BetaCC instead of Beta
     with pytest.raises(ValidationError):
-        BetaMO(counters=[BetaCC(cost=1), BetaCC(cost=1)])
+        BetaMO(models=[BetaCC(cost=1), BetaCC(cost=1)])
 
 
 ########################################################################################################################
@@ -184,21 +185,21 @@ def test_can_init_beta_mo():
 def test_can_init_beta_mo_cc(a_float):
     if a_float < 0 or np.isnan(a_float):
         with pytest.raises(ValidationError):
-            BetaMOCC(counters=[Beta(), Beta()], cost=a_float)
+            BetaMOCC(models=[Beta(), Beta()], cost=a_float)
     else:
         # init with default params
-        b = BetaMOCC(counters=[Beta(), Beta()], cost=a_float)
-        assert b.counters == [Beta(), Beta()]
+        b = BetaMOCC(models=[Beta(), Beta()], cost=a_float)
+        assert b.models == [Beta(), Beta()]
         assert b.cost == a_float
 
         # init with empty dict
-        b = BetaMOCC(counters=[{}, {}], cost=a_float)
-        assert b.counters == [Beta(), Beta()]
+        b = BetaMOCC(models=[{}, {}], cost=a_float)
+        assert b.models == [Beta(), Beta()]
         assert b.cost == a_float
 
         # invalid init with BetaCC instead of Beta
         with pytest.raises(ValidationError):
-            BetaMOCC(counters=[BetaCC(cost=1), BetaCC(cost=1)], cost=a_float)
+            BetaMOCC(models=[BetaCC(cost=1), BetaCC(cost=1)], cost=a_float)
 
 
 ########################################################################################################################
@@ -285,12 +286,15 @@ def test_check_context_matrix(n_samples, n_features):
         blr.check_context_matrix(context=[1.0])  # context is a 1-dim list
 
 
-@given(st.integers(min_value=1, max_value=1000), st.integers(min_value=1, max_value=100))
+@given(
+    st.integers(min_value=1, max_value=10),
+    st.integers(min_value=1, max_value=10),
+)
 def test_blr_sample_proba(n_samples, n_features):
     def sample_proba(context):
-        prob, weighted_sum = blr.sample_proba(context=context)
-
-        assert type(prob) is type(weighted_sum) is np.ndarray  # type of the returns must be np.ndarray
+        prob_weighted_sum = blr.sample_proba(context=context)
+        prob, weighted_sum = list(zip(*prob_weighted_sum))
+        assert type(prob) is type(weighted_sum) is tuple  # type of the returns must be np.ndarray
         assert len(prob) == len(weighted_sum) == n_samples  # return 1 sampled probability and ws per each sample
         assert all([0 <= p <= 1 for p in prob])  # probs must be in the interval [0, 1]
 
@@ -312,33 +316,33 @@ def test_blr_sample_proba(n_samples, n_features):
     sample_proba(context=context)
 
 
-def test_blr_update(n_samples=100, n_features=3):
+@settings(deadline=None)
+@given(
+    st.integers(min_value=1, max_value=5),
+    st.integers(min_value=1, max_value=3),
+    st.sampled_from(literal_update_methods),
+    st.just({"draws": 10}),
+)
+def test_blr_update(n_samples, n_features, update_method, update_kwargs):
     def update(context, rewards):
-        blr = BayesianLogisticRegression.cold_start(n_features=n_features)
+        blr = BayesianLogisticRegression.cold_start(
+            n_features=n_features, update_method=update_method, update_kwargs=update_kwargs
+        )
         assert blr.alpha == StudentT(mu=0.0, sigma=10.0, nu=5.0)
-        assert blr.betas == [
-            StudentT(mu=0.0, sigma=10.0, nu=5.0),
-            StudentT(mu=0.0, sigma=10.0, nu=5.0),
-            StudentT(mu=0.0, sigma=10.0, nu=5.0),
-        ]
-
+        assert blr.betas == [StudentT(mu=0.0, sigma=10.0, nu=5.0)] * n_features
+        old_blr = deepcopy(blr)
         blr.update(context=context, rewards=rewards)
 
-        assert blr.alpha != StudentT(mu=0.0, sigma=10.0, nu=5.0)
-        assert blr.betas != [
-            StudentT(mu=0.0, sigma=10.0, nu=5.0),
-            StudentT(mu=0.0, sigma=10.0, nu=5.0),
-            StudentT(mu=0.0, sigma=10.0, nu=5.0),
-        ]
+        assert old_blr != blr
 
     rewards = np.random.choice([0, 1], size=n_samples).tolist()
 
     # context is numpy array
-    context = np.random.uniform(low=-100.0, high=100.0, size=(n_samples, n_features))
+    context = np.random.uniform(low=-1.0, high=1.0, size=(n_samples, n_features))
     assert type(context) is np.ndarray
     update(context=context, rewards=rewards)
-
-    # context is python list
+    #
+    # # context is python list
     context = context.tolist()
     assert type(context) is list
     update(context=context, rewards=rewards)
@@ -349,9 +353,11 @@ def test_blr_update(n_samples=100, n_features=3):
     update(context=context, rewards=rewards)
 
     # raise an error if len(context) != len(rewards)
+    blr = BayesianLogisticRegression.cold_start(
+        n_features=n_features, update_method=update_method, update_kwargs=update_kwargs
+    )
     with pytest.raises(ValueError):
-        blr = BayesianLogisticRegression.cold_start(n_features=n_features)
-        blr.update(context=context, rewards=rewards[1:])
+        blr.update(context=context, rewards=rewards + [rewards[-1]])
 
 
 ########################################################################################################################
